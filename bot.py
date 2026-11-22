@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
@@ -56,17 +56,24 @@ FIX = {
     "وان پیس": "وان‌پیس",
 }
 
-translator = GoogleTranslator(source="auto", target="fa")
+google = GoogleTranslator(source="auto", target="fa")
+mymemory = MyMemoryTranslator(source="en-GB", target="fa-IR")
 
 
 def fa(text):
     if not text:
         return ""
+    out = None
     try:
-        out = translator.translate(text[:900]) or text
+        out = google.translate(text[:900])
     except Exception as ex:
-        print("TRANSLATE ERROR", ex)
-        return text
+        print("GOOGLE TRANSLATE ERROR", ex)
+    if not out or out.strip() == text.strip():
+        try:
+            out = mymemory.translate(text[:450])
+        except Exception as ex:
+            print("MYMEMORY ERROR", ex)
+    out = out or text
     for a, b in FIX.items():
         out = out.replace(a, b)
     return out
