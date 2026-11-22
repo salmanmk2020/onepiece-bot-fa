@@ -8,6 +8,8 @@ from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
 MAX_POSTS = 1
 REQUIRE_IMAGE = True
 FALLBACK_NO_IMAGE = True
@@ -50,7 +52,25 @@ BDAYS = {
     (11, 11): ["رورونوآ زورو"], (12, 24): ["چاپر"], (12, 31): ["گل دی. راجر"],
 }
 
-# اصلاح ترجمه‌های اشتباه رایج؛ هر چی دیدی غلط ترجمه شده اینجا اضافه کن
+# لیست اسم‌های ثابت برای ترجمه؛ هر اسمی دیدی غلط ترجمه شد اینجا اضافه کن
+GLOSSARY = {
+    "One Piece": "وان‌پیس",
+    "Monkey D. Luffy": "مانکی دی. لوفی",
+    "Luffy": "لوفی", "Zoro": "زورو", "Nami": "نامی", "Usopp": "اوسوپ",
+    "Sanji": "سنجی", "Chopper": "چاپر", "Nico Robin": "نیکو رابین",
+    "Franky": "فرانکی", "Brook": "بروک", "Jinbe": "جینبی",
+    "Straw Hat Pirates": "دزدان دریایی کلاه‌حصیری",
+    "Straw Hats": "کلاه‌حصیری‌ها",
+    "Gear 5": "گیر ۵", "Devil Fruit": "میوه‌ی شیطان",
+    "Elbaf": "الباف", "Wano": "وانو", "Eiichiro Oda": "ایچیرو اودا",
+    "Toei Animation": "تویی انیمیشن", "Shonen Jump": "شونن جامپ",
+    "Yonko": "یونکو", "Marines": "نیروی دریایی",
+    "Shanks": "شنکس", "Blackbeard": "ریش‌سیاه", "Whitebeard": "ریش‌سفید",
+    "Trafalgar Law": "ترافالگار لا", "Sabo": "سابو",
+    "Portgas D. Ace": "پورتگاز دی. ایس",
+}
+
+# اصلاح ترجمه‌های اشتباه رایج ترجمه‌ی ماشینی (فقط وقتی Gemini در دسترس نیست)
 FIX = {
     "یک تکه": "وان‌پیس",
     "وان پیس": "وان‌پیس",
@@ -77,6 +97,40 @@ def fa(text):
     for a, b in FIX.items():
         out = out.replace(a, b)
     return out
+
+
+def gemini_fa(title, summary):
+    if not GEMINI_KEY:
+        return None
+    gl = "\n".join("%s = %s" % (k, v) for k, v in GLOSSARY.items())
+    prompt = (
+        "You are a professional anime news translator. Translate the news below into natural, "
+        "fluent Persian (Farsi) for a Telegram channel about One Piece. When a name from the "
+        "glossary appears, use exactly the Persian form given; transliterate other names naturally. "
+        "Do not add or remove facts. Keep chapter and episode numbers as digits. "
+        "Output ONLY in this exact format:\n"
+        "TITLE: <translated title>\nSUMMARY: <translated summary, or empty>\n\n"
+        "Glossary:\n" + gl + "\n\n"
+        "TITLE: " + title + "\nSUMMARY: " + (summary or "")
+    )
+    try:
+        r = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent",
+            headers={"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=45)
+        if not r.ok:
+            print("GEMINI ERROR", r.status_code, r.text[:200])
+            return None
+        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].replace("**", "").strip()
+        m = re.search(r"TITLE:\s*(.+?)\s*(?:\nSUMMARY:\s*(.*))?$", txt, re.S)
+        if not m:
+            print("GEMINI FORMAT?", txt[:150])
+            return None
+        return m.group(1).strip(), (m.group(2) or "").strip()
+    except Exception as ex:
+        print("GEMINI ERROR", ex)
+        return None
 
 
 def esc(s):
@@ -177,8 +231,12 @@ def news_item(e, force):
 
 def build_text(it):
     e = it["e"]
-    title_fa = fa(it["title"])
-    summ_fa = fa(it["summary"]) if it["summary"] else ""
+    res = gemini_fa(it["title"], it["summary"])
+    if res:
+        title_fa, summ_fa = res
+    else:
+        title_fa = fa(it["title"])
+        summ_fa = fa(it["summary"]) if it["summary"] else ""
     if it["spoiler"]:
         t = "<tg-spoiler>" + esc(title_fa) + "</tg-spoiler>"
     else:
