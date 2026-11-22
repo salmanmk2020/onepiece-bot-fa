@@ -101,6 +101,7 @@ def fa(text):
 
 def gemini_fa(title, summary):
     if not GEMINI_KEY:
+        print("GEMINI: کلید تنظیم نشده")
         return None
     gl = "\n".join("%s = %s" % (k, v) for k, v in GLOSSARY.items())
     prompt = (
@@ -232,6 +233,7 @@ def news_item(e, force):
 def build_text(it):
     e = it["e"]
     res = gemini_fa(it["title"], it["summary"])
+    print("ترجمه با:", "Gemini" if res else "ترجمه ماشینی")
     if res:
         title_fa, summ_fa = res
     else:
