@@ -10,6 +10,9 @@ TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
+GEMINI_MODELS = list(dict.fromkeys([GEMINI_MODEL, "gemini-flash-lite-latest"]))
+REQUIRE_GEMINI = True
+GEMINI_FAILED = False
 MAX_POSTS = 1
 REQUIRE_IMAGE = True
 FALLBACK_NO_IMAGE = True
@@ -83,20 +86,48 @@ mymemory = MyMemoryTranslator(source="en-GB", target="fa-IR")
 def fa(text):
     if not text:
         return ""
+    time.sleep(1.2)
     out = None
     try:
         out = google.translate(text[:900])
     except Exception as ex:
-        print("GOOGLE TRANSLATE ERROR", ex)
+        print("GOOGLE TRANSLATE ERROR", str(ex)[:120])
     if not out or out.strip() == text.strip():
         try:
             out = mymemory.translate(text[:450])
         except Exception as ex:
-            print("MYMEMORY ERROR", ex)
+            print("MYMEMORY ERROR", str(ex)[:120])
     out = out or text
     for a, b in FIX.items():
         out = out.replace(a, b)
     return out
+
+
+def gemini_call(prompt):
+    for model in GEMINI_MODELS:
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
+                    headers={"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=45)
+            except Exception as ex:
+                print("GEMINI ERROR", model, str(ex)[:120])
+                time.sleep(5)
+                continue
+            if r.ok:
+                try:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception as ex:
+                    print("GEMINI BAD RESPONSE", model, str(ex)[:120])
+                    break
+            print("GEMINI ERROR", model, r.status_code, r.text[:120].replace("\n", " "))
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(6 * (attempt + 1))
+                continue
+            break
+    return None
 
 
 def gemini_fa(title, summary):
@@ -114,24 +145,15 @@ def gemini_fa(title, summary):
         "Glossary:\n" + gl + "\n\n"
         "TITLE: " + title + "\nSUMMARY: " + (summary or "")
     )
-    try:
-        r = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent",
-            headers={"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=45)
-        if not r.ok:
-            print("GEMINI ERROR", r.status_code, r.text[:200])
-            return None
-        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"].replace("**", "").strip()
-        m = re.search(r"TITLE:\s*(.+?)\s*(?:\nSUMMARY:\s*(.*))?$", txt, re.S)
-        if not m:
-            print("GEMINI FORMAT?", txt[:150])
-            return None
-        return m.group(1).strip(), (m.group(2) or "").strip()
-    except Exception as ex:
-        print("GEMINI ERROR", ex)
+    txt = gemini_call(prompt)
+    if not txt:
         return None
+    txt = txt.replace("**", "").strip()
+    m = re.search(r"TITLE:\s*(.+?)\s*(?:\nSUMMARY:\s*(.*))?$", txt, re.S)
+    if not m:
+        print("GEMINI FORMAT?", txt[:150])
+        return None
+    return m.group(1).strip(), (m.group(2) or "").strip()
 
 
 def esc(s):
@@ -231,8 +253,13 @@ def news_item(e, force):
 
 
 def build_text(it):
+    global GEMINI_FAILED
     e = it["e"]
     res = gemini_fa(it["title"], it["summary"])
+    if res is None and GEMINI_KEY and REQUIRE_GEMINI:
+        GEMINI_FAILED = True
+        print("ترجمه Gemini ناموفق بود؛ این بار پست نمی‌شود و اجرای بعدی دوباره امتحان می‌کند")
+        return None
     print("ترجمه با:", "Gemini" if res else "ترجمه ماشینی")
     if res:
         title_fa, summ_fa = res
@@ -289,7 +316,10 @@ def episode_item():
 
 def send(it, img):
     if it.get("raw"):
-        it["text"] = build_text(it)
+        text = build_text(it)
+        if text is None:
+            return False
+        it["text"] = text
         it["raw"] = False
     base = "https://api.telegram.org/bot" + TOKEN
     if img:
@@ -359,14 +389,18 @@ for it in items[:15]:
     if send(it, img):
         seen.update(it["keys"])
         posted += 1
+    elif GEMINI_FAILED:
+        break
 
-if posted == 0 and FALLBACK_NO_IMAGE:
+if posted == 0 and FALLBACK_NO_IMAGE and not GEMINI_FAILED:
     for it in noimg:
         if it["spoiler"]:
             continue
         if send(it, None):
             seen.update(it["keys"])
             posted += 1
+        elif GEMINI_FAILED:
+            break
         if posted >= MAX_POSTS:
             break
 
