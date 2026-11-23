@@ -83,6 +83,20 @@ google = GoogleTranslator(source="auto", target="fa")
 mymemory = MyMemoryTranslator(source="en-GB", target="fa-IR")
 
 
+def full_sentences(text, limit=400):
+    """متن رو تا آخرین جمله‌ی کامل نگه می‌داره؛ تکه‌ی ناقص و ... حذف می‌شه"""
+    text = (text or "").strip()
+    cut = len(text) > limit
+    text = text[:limit]
+    if text.endswith(("...", "…")):
+        text = re.sub(r"\s*[.…]+$", "", text)
+        cut = True
+    if not cut:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?؟](?=\s|$)", text)]
+    return text[:ends[-1]].strip() if ends else ""
+
+
 def fa(text):
     if not text:
         return ""
@@ -130,20 +144,27 @@ def gemini_call(prompt):
     return None
 
 
-def gemini_fa(title, summary):
+def gemini_fa(title, excerpt, article):
     if not GEMINI_KEY:
         print("GEMINI: کلید تنظیم نشده")
         return None
     gl = "\n".join("%s = %s" % (k, v) for k, v in GLOSSARY.items())
     prompt = (
-        "You are a professional anime news translator. Translate the news below into natural, "
-        "fluent Persian (Farsi) for a Telegram channel about One Piece. When a name from the "
-        "glossary appears, use exactly the Persian form given; transliterate other names naturally. "
-        "Do not add or remove facts. Keep chapter and episode numbers as digits. "
+        "You are a professional anime news translator and editor. Based ONLY on the information "
+        "below, write a Persian (Farsi) post for a Telegram channel about One Piece.\n"
+        "- TITLE: natural, fluent Persian translation of the title.\n"
+        "- SUMMARY: 2 to 3 COMPLETE Persian sentences (about 250 to 400 characters) summarizing the "
+        "key point of the news. It must end with a full sentence. Never cut off mid-sentence and "
+        "never end with '...'. If there is little information, write 1 complete sentence. "
+        "Do not invent facts.\n"
+        "- When a name from the glossary appears, use exactly the Persian form given; "
+        "transliterate other names naturally. Keep chapter and episode numbers as digits.\n"
         "Output ONLY in this exact format:\n"
-        "TITLE: <translated title>\nSUMMARY: <translated summary, or empty>\n\n"
+        "TITLE: <title>\nSUMMARY: <summary>\n\n"
         "Glossary:\n" + gl + "\n\n"
-        "TITLE: " + title + "\nSUMMARY: " + (summary or "")
+        "ENGLISH TITLE: " + title + "\n"
+        "FEED EXCERPT: " + (excerpt or "") + "\n"
+        "ARTICLE TEXT: " + (article or "")[:1800]
     )
     txt = gemini_call(prompt)
     if not txt:
@@ -153,7 +174,29 @@ def gemini_fa(title, summary):
     if not m:
         print("GEMINI FORMAT?", txt[:150])
         return None
-    return m.group(1).strip(), (m.group(2) or "").strip()
+    return m.group(1).strip(), full_sentences((m.group(2) or "").strip(), 600)
+
+
+def article_text(e):
+    if "news.google.com" in e.link:
+        return ""
+    try:
+        r = requests.get(e.link, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        parts = []
+        d = (soup.find("meta", property="og:description")
+             or soup.find("meta", attrs={"name": "description"}))
+        if d and d.get("content"):
+            parts.append(d["content"].strip())
+        for p in soup.find_all("p"):
+            t = p.get_text(" ", strip=True)
+            if len(t) > 80:
+                parts.append(t)
+            if sum(len(x) for x in parts) > 1800:
+                break
+        return " ".join(parts)[:2000]
+    except Exception:
+        return ""
 
 
 def esc(s):
@@ -240,7 +283,7 @@ def news_item(e, force):
     label, spoiler, prio = categorize(title)
     if force == "spoiler":
         label, spoiler, prio = CATS[0][1], True, 7
-    summary = clean(e.get("summary", ""))[:350]
+    summary = clean(e.get("summary", ""))[:1000]
     if "news.google.com" in e.link or summary.lower().startswith(title.lower()[:30]):
         summary = ""
     key_t = "t:" + re.sub(r"\W+", "", title.lower())[:80]
@@ -255,7 +298,9 @@ def news_item(e, force):
 def build_text(it):
     global GEMINI_FAILED
     e = it["e"]
-    res = gemini_fa(it["title"], it["summary"])
+    excerpt = full_sentences(it["summary"], 500)
+    article = article_text(e) if GEMINI_KEY else ""
+    res = gemini_fa(it["title"], excerpt, article)
     if res is None and GEMINI_KEY and REQUIRE_GEMINI:
         GEMINI_FAILED = True
         print("ترجمه Gemini ناموفق بود؛ این بار پست نمی‌شود و اجرای بعدی دوباره امتحان می‌کند")
@@ -265,7 +310,7 @@ def build_text(it):
         title_fa, summ_fa = res
     else:
         title_fa = fa(it["title"])
-        summ_fa = fa(it["summary"]) if it["summary"] else ""
+        summ_fa = full_sentences(fa(excerpt), 600) if excerpt else ""
     if it["spoiler"]:
         t = "<tg-spoiler>" + esc(title_fa) + "</tg-spoiler>"
     else:
